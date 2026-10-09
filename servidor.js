@@ -38,6 +38,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /* ──────────────────────────────────────────────────────────── */
+/* Puertos dinámicos (Render asigna PORT)                        */
+/* ──────────────────────────────────────────────────────────── */
+const PUBLIC_PORT = process.env.PORT || 3000;
+const AUTH_PORT   = process.env.AUTH_PORT || 4000;
+const API_PORT    = process.env.API_PORT  || 4001;
+
+/* ──────────────────────────────────────────────────────────── */
 /* Ruta al dist de React                                         */
 /* ──────────────────────────────────────────────────────────── */
 const DIST_DIR = path.join(__dirname, "dist");
@@ -46,22 +53,32 @@ const DIST_EXISTS = fs.existsSync(DIST_INDEX);
 
 console.log("\n═══════════════════════════════════════════");
 console.log("🚀 ARRANCANDO BACKEND CON PROXY");
-console.log("═══════════════════════════════════════════\n");
+console.log("═══════════════════════════════════════════");
+console.log(`   Puerto público: ${PUBLIC_PORT}`);
+console.log(`   Auth interno:   ${AUTH_PORT}`);
+console.log(`   API interna:    ${API_PORT}\n`);
 
 /* ──────────────────────────────────────────────────────────── */
-/* imansi en :4000                                               */
+/* imansi en :AUTH_PORT                                          */
 /* ──────────────────────────────────────────────────────────── */
 const authApp = crearServidorAutenticacion({
   jwt: { secreto: process.env.JWT_SECRETO, expiracion: "15m" },
 });
-authApp.listen(4000, () => {
-  console.log("🔒 [4000] Auth de imansi (interno)");
+
+// ✅ FIX: confiar en el proxy de Render (1 salto)
+authApp.set("trust proxy", 1);
+
+authApp.listen(AUTH_PORT, () => {
+  console.log(`🔒 [${AUTH_PORT}] Auth de imansi (interno)`);
 });
 
 /* ──────────────────────────────────────────────────────────── */
-/* Tu API en :4001                                               */
+/* Tu API en :API_PORT                                           */
 /* ──────────────────────────────────────────────────────────── */
 const apiApp = express();
+
+// ✅ FIX: confiar en el proxy de Render
+apiApp.set("trust proxy", 1);
 
 apiApp.use(express.json({ limit: "10mb" }));
 apiApp.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -89,54 +106,51 @@ apiApp.use("/api/vendedor", vendedorDashboardRutas);
 apiApp.use("/api/admin", adminDashboardRutas);
 apiApp.use("/api/admin", adminActividadRutas);
 
-apiApp.listen(4001, () => {
-  console.log("🔓 [4001] API (roles + library + frases + precios + usuarios + perfil) (interno)");
+apiApp.listen(API_PORT, () => {
+  console.log(`🔓 [${API_PORT}] API interna`);
 });
 
 /* ──────────────────────────────────────────────────────────── */
-/* Proxy público en :3000                                        */
+/* Proxy público en :PUBLIC_PORT                                 */
 /* ──────────────────────────────────────────────────────────── */
 const proxy = express();
+
+// ✅ FIX: confiar en el proxy de Render
+proxy.set("trust proxy", 1);
 
 proxy.use(
   cors({
     origin: [
       "http://localhost:5173",
       "http://localhost:3000",
-    ],
+      process.env.CORS_ORIGIN,
+    ].filter(Boolean),
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
   })
 );
 
-/* ──────────────────────────────────────────────────────────── */
-/* 1. API → :4001                                                */
-/* ──────────────────────────────────────────────────────────── */
+/* ── 1. API → :API_PORT ── */
 proxy.use(
   createProxyMiddleware({
     pathFilter: "/api/**",
-    target: "http://localhost:4001",
+    target: `http://localhost:${API_PORT}`,
     changeOrigin: true,
   })
 );
 
-/* ──────────────────────────────────────────────────────────── */
-/* 2. Rutas de auth de imansi → :4000                            */
-/* ──────────────────────────────────────────────────────────── */
+/* ── 2. Auth → :AUTH_PORT ── */
 proxy.use(
   createProxyMiddleware({
     pathFilter: "/auth/**",
-    target: "http://localhost:4000",
+    target: `http://localhost:${AUTH_PORT}`,
     changeOrigin: true,
   })
 );
 
-/* ──────────────────────────────────────────────────────────── */
-/* 3. React (dist) con fallback SPA                              */
-/* ──────────────────────────────────────────────────────────── */
+/* ── 3. React (dist) + SPA fallback ── */
 if (DIST_EXISTS) {
-  // Assets estáticos (JS, CSS, imágenes, fuentes…)
   proxy.use(
     express.static(DIST_DIR, {
       index: false,
@@ -145,7 +159,6 @@ if (DIST_EXISTS) {
     })
   );
 
-  // Fallback SPA — ✅ SIN "*" (compatible con Express 5)
   proxy.use((req, res, next) => {
     if (req.method !== "GET") return next();
     if (req.path.startsWith("/api")) return next();
@@ -156,32 +169,25 @@ if (DIST_EXISTS) {
   console.log(`📦 Sirviendo React desde: ${DIST_DIR}`);
 } else {
   console.log(`⚠️  No se encontró ${DIST_INDEX}`);
-  console.log(`   El servidor NO servirá el frontend build.`);
-  console.log(`   Corré "npm run build" en el frontend y copiá dist/ acá.`);
 }
 
-/* ──────────────────────────────────────────────────────────── */
-/* 4. Fallback final → imansi :4000                              */
-/* ──────────────────────────────────────────────────────────── */
+/* ── 4. Fallback → :AUTH_PORT ── */
 proxy.use(
   createProxyMiddleware({
-    target: "http://localhost:4000",
+    target: `http://localhost:${AUTH_PORT}`,
     changeOrigin: true,
   })
 );
 
-proxy.listen(3000, () => {
+proxy.listen(PUBLIC_PORT, () => {
   console.log("\n═══════════════════════════════════════════");
-  console.log("🚀 Servidor público en http://localhost:3000");
-  console.log("   → /api/**    → :4001 (API)");
-  console.log("   → /auth/**   → :4000 (imansi)");
-  console.log("   → /*         → React dist (SPA)");
+  console.log(`🚀 Servidor público en puerto ${PUBLIC_PORT}`);
+  console.log(`   → /api/**    → :${API_PORT} (API)`);
+  console.log(`   → /auth/**   → :${AUTH_PORT} (imansi)`);
+  console.log(`   → /*         → React dist (SPA)`);
   console.log("═══════════════════════════════════════════\n");
 });
 
-/* ──────────────────────────────────────────────────────────── */
-/* Cerrar pool al salir                                          */
-/* ──────────────────────────────────────────────────────────── */
 process.on("SIGINT", async () => {
   await cerrarPool();
   process.exit(0);
